@@ -12,10 +12,13 @@ from pathlib import Path
 import tempfile
 import shutil
 from datetime import datetime
+import numpy as np
+from PIL import Image, ImageDraw, ImageFont
+import textwrap
 
 # MoviePy imports
 from moviepy.editor import (
-    VideoFileClip, AudioFileClip, TextClip, CompositeVideoClip,
+    VideoFileClip, AudioFileClip, ImageClip, CompositeVideoClip,
     concatenate_videoclips, ColorClip
 )
 
@@ -67,6 +70,149 @@ class VideoResponse(BaseModel):
 # In-memory storage for video status
 video_status = {}
 
+def hex_to_rgb(hex_color: str) -> tuple:
+    """Convert hex color to RGB tuple"""
+    hex_color = hex_color.lstrip('#')
+    return tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
+
+def get_font(font_size: int):
+    """Get font with fallback system"""
+    font_paths = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+        "/System/Library/Fonts/Arial.ttf",  # macOS
+        "C:/Windows/Fonts/arial.ttf",  # Windows
+    ]
+    
+    for font_path in font_paths:
+        try:
+            if os.path.exists(font_path):
+                return ImageFont.truetype(font_path, font_size)
+        except Exception:
+            continue
+    
+    # Fallback to default font
+    try:
+        return ImageFont.load_default()
+    except Exception:
+        return None
+
+def create_text_image(text: str, font_size: int, text_color: str, 
+                     image_size: tuple, position: str = "center") -> Image.Image:
+    """Create text image using PIL"""
+    width, height = image_size
+    
+    # Create transparent image
+    img = Image.new('RGBA', (width, height), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    
+    # Get font
+    font = get_font(font_size)
+    if font is None:
+        # Use a basic font size if no font is available
+        font_size = min(font_size, 72)  # Cap font size
+    
+    # Convert color
+    rgb_color = hex_to_rgb(text_color)
+    
+    # Word wrap for long text
+    max_chars_per_line = max(20, width // (font_size // 2))
+    wrapped_text = textwrap.fill(text, width=max_chars_per_line)
+    lines = wrapped_text.split('\n')
+    
+    # Calculate text dimensions
+    if font:
+        # Get text bbox for each line
+        line_heights = []
+        line_widths = []
+        for line in lines:
+            bbox = draw.textbbox((0, 0), line, font=font)
+            line_widths.append(bbox[2] - bbox[0])
+            line_heights.append(bbox[3] - bbox[1])
+        
+        total_height = sum(line_heights) + (len(lines) - 1) * 10  # 10px spacing
+        max_width = max(line_widths)
+    else:
+        # Fallback calculation
+        char_width = font_size // 2
+        char_height = font_size
+        max_width = max(len(line) * char_width for line in lines)
+        total_height = len(lines) * char_height + (len(lines) - 1) * 10
+    
+    # Calculate position
+    if position == "center":
+        start_y = (height - total_height) // 2
+    elif position == "top":
+        start_y = 50
+    elif position == "bottom":
+        start_y = height - total_height - 50
+    else:
+        start_y = (height - total_height) // 2
+    
+    # Draw each line
+    current_y = start_y
+    for i, line in enumerate(lines):
+        if font:
+            bbox = draw.textbbox((0, 0), line, font=font)
+            line_width = bbox[2] - bbox[0]
+            line_height = bbox[3] - bbox[1]
+        else:
+            line_width = len(line) * (font_size // 2)
+            line_height = font_size
+        
+        x = (width - line_width) // 2  # Center horizontally
+        
+        try:
+            if font:
+                draw.text((x, current_y), line, fill=rgb_color, font=font)
+            else:
+                # Fallback without font
+                draw.text((x, current_y), line, fill=rgb_color)
+        except Exception as e:
+            logger.warning(f"Error drawing text with font, using fallback: {e}")
+            draw.text((x, current_y), line, fill=rgb_color)
+        
+        current_y += line_height + 10  # 10px spacing between lines
+    
+    return img
+
+def create_text_clip_pil(clip_data: VideoClip, resolution: tuple) -> ImageClip:
+    """Create a text clip using PIL"""
+    try:
+        # Create text image
+        text_img = create_text_image(
+            text=clip_data.text,
+            font_size=clip_data.font_size,
+            text_color=clip_data.text_color,
+            image_size=resolution,
+            position=clip_data.position
+        )
+        
+        # Convert PIL image to numpy array
+        img_array = np.array(text_img)
+        
+        # Create ImageClip
+        text_clip = ImageClip(img_array, duration=clip_data.duration)
+        
+        return text_clip
+        
+    except Exception as e:
+        logger.error(f"Error creating PIL text clip: {str(e)}")
+        # Return a simple fallback
+        fallback_img = Image.new('RGBA', resolution, (0, 0, 0, 0))
+        draw = ImageDraw.Draw(fallback_img)
+        draw.text((resolution[0]//4, resolution[1]//2), 
+                 clip_data.text[:50], fill=(255, 255, 255, 255))
+        return ImageClip(np.array(fallback_img), duration=clip_data.duration)
+
+def create_background_clip(clip_data: VideoClip, resolution: tuple) -> ColorClip:
+    """Create a colored background clip"""
+    return ColorClip(
+        size=resolution,
+        color=clip_data.background_color,
+        duration=clip_data.duration
+    )
+
 @app.get("/health")
 async def health_check():
     """Health check endpoint"""
@@ -104,47 +250,6 @@ async def download_audio(url: str, temp_dir: str) -> Optional[str]:
         logger.error(f"Error downloading audio: {str(e)}")
         return None
 
-def create_text_clip(clip_data: VideoClip, resolution: tuple) -> TextClip:
-    """Create a text clip with specified properties"""
-    try:
-        text_clip = TextClip(
-            clip_data.text,
-            fontsize=clip_data.font_size,
-            color=clip_data.text_color,
-            font='Arial-Bold',  # Safe font for ARM64
-            method='caption',
-            size=(resolution[0] * 0.8, None)  # 80% of video width
-        ).set_duration(clip_data.duration)
-        
-        # Set position
-        if clip_data.position == "center":
-            text_clip = text_clip.set_position('center')
-        elif clip_data.position == "top":
-            text_clip = text_clip.set_position(('center', 50))
-        elif clip_data.position == "bottom":
-            text_clip = text_clip.set_position(('center', resolution[1] - 100))
-        else:
-            text_clip = text_clip.set_position('center')
-            
-        return text_clip
-        
-    except Exception as e:
-        logger.error(f"Error creating text clip: {str(e)}")
-        # Fallback to simpler text clip
-        return TextClip(
-            clip_data.text,
-            fontsize=50,
-            color='white'
-        ).set_duration(clip_data.duration).set_position('center')
-
-def create_background_clip(clip_data: VideoClip, resolution: tuple) -> ColorClip:
-    """Create a colored background clip"""
-    return ColorClip(
-        size=resolution,
-        color=clip_data.background_color,
-        duration=clip_data.duration
-    )
-
 async def create_video_from_clips(request: VideoRequest, video_id: str) -> str:
     """Main function to create video from clips"""
     temp_dir = None
@@ -169,8 +274,8 @@ async def create_video_from_clips(request: VideoRequest, video_id: str) -> str:
             # Create background
             background = create_background_clip(clip_data, resolution)
             
-            # Create text overlay
-            text_clip = create_text_clip(clip_data, resolution)
+            # Create text overlay using PIL
+            text_clip = create_text_clip_pil(clip_data, resolution)
             
             # Composite clip
             composite_clip = CompositeVideoClip([background, text_clip])
