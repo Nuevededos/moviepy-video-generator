@@ -28,8 +28,8 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="MoviePy Video Generator",
-    description="Servicio gratuito para generar videos motivacionales con MoviePy",
-    version="1.0.0"
+    description="Servicio gratuito para generar videos motivacionales con MoviePy + PIL",
+    version="1.1.0"  # Updated version
 )
 
 # Configuration
@@ -76,10 +76,12 @@ def hex_to_rgb(hex_color: str) -> tuple:
     return tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
 
 def get_font(font_size: int):
-    """Get font with fallback system"""
+    """Get font with fallback system - PIL based"""
     font_paths = [
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
         "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
         "/System/Library/Fonts/Arial.ttf",  # macOS
         "C:/Windows/Fonts/arial.ttf",  # Windows
     ]
@@ -88,18 +90,20 @@ def get_font(font_size: int):
         try:
             if os.path.exists(font_path):
                 return ImageFont.truetype(font_path, font_size)
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Font {font_path} failed: {e}")
             continue
     
     # Fallback to default font
     try:
         return ImageFont.load_default()
     except Exception:
+        logger.warning("Using basic font fallback")
         return None
 
 def create_text_image(text: str, font_size: int, text_color: str, 
                      image_size: tuple, position: str = "center") -> Image.Image:
-    """Create text image using PIL"""
+    """Create text image using PIL - Robust implementation"""
     width, height = image_size
     
     # Create transparent image
@@ -108,15 +112,15 @@ def create_text_image(text: str, font_size: int, text_color: str,
     
     # Get font
     font = get_font(font_size)
-    if font is None:
-        # Use a basic font size if no font is available
-        font_size = min(font_size, 72)  # Cap font size
     
     # Convert color
-    rgb_color = hex_to_rgb(text_color)
+    try:
+        rgb_color = hex_to_rgb(text_color)
+    except:
+        rgb_color = (255, 255, 255)  # White fallback
     
     # Word wrap for long text
-    max_chars_per_line = max(20, width // (font_size // 2))
+    max_chars_per_line = max(15, min(50, width // (font_size // 3)))
     wrapped_text = textwrap.fill(text, width=max_chars_per_line)
     lines = wrapped_text.split('\n')
     
@@ -126,59 +130,74 @@ def create_text_image(text: str, font_size: int, text_color: str,
         line_heights = []
         line_widths = []
         for line in lines:
-            bbox = draw.textbbox((0, 0), line, font=font)
-            line_widths.append(bbox[2] - bbox[0])
-            line_heights.append(bbox[3] - bbox[1])
+            try:
+                bbox = draw.textbbox((0, 0), line, font=font)
+                line_widths.append(bbox[2] - bbox[0])
+                line_heights.append(bbox[3] - bbox[1])
+            except:
+                # Fallback calculation
+                line_widths.append(len(line) * font_size // 2)
+                line_heights.append(font_size)
         
         total_height = sum(line_heights) + (len(lines) - 1) * 10  # 10px spacing
-        max_width = max(line_widths)
+        max_width = max(line_widths) if line_widths else font_size
     else:
-        # Fallback calculation
-        char_width = font_size // 2
-        char_height = font_size
-        max_width = max(len(line) * char_width for line in lines)
+        # Fallback calculation when no font available
+        char_width = max(font_size // 2, 12)
+        char_height = max(font_size, 20)
+        max_width = max(len(line) * char_width for line in lines) if lines else char_width
         total_height = len(lines) * char_height + (len(lines) - 1) * 10
     
     # Calculate position
     if position == "center":
-        start_y = (height - total_height) // 2
+        start_y = max(50, (height - total_height) // 2)
     elif position == "top":
         start_y = 50
     elif position == "bottom":
-        start_y = height - total_height - 50
+        start_y = max(50, height - total_height - 50)
     else:
-        start_y = (height - total_height) // 2
+        start_y = max(50, (height - total_height) // 2)
     
     # Draw each line
     current_y = start_y
     for i, line in enumerate(lines):
+        if not line.strip():  # Skip empty lines
+            current_y += 20
+            continue
+            
         if font:
-            bbox = draw.textbbox((0, 0), line, font=font)
-            line_width = bbox[2] - bbox[0]
-            line_height = bbox[3] - bbox[1]
+            try:
+                bbox = draw.textbbox((0, 0), line, font=font)
+                line_width = bbox[2] - bbox[0]
+                line_height = max(bbox[3] - bbox[1], 20)
+            except:
+                line_width = len(line) * (font_size // 2)
+                line_height = font_size
         else:
-            line_width = len(line) * (font_size // 2)
-            line_height = font_size
+            line_width = len(line) * max(font_size // 2, 12)
+            line_height = max(font_size, 20)
         
-        x = (width - line_width) // 2  # Center horizontally
+        x = max(20, (width - line_width) // 2)  # Center horizontally with margin
         
         try:
             if font:
                 draw.text((x, current_y), line, fill=rgb_color, font=font)
             else:
-                # Fallback without font
+                # Fallback without font - use default
                 draw.text((x, current_y), line, fill=rgb_color)
         except Exception as e:
-            logger.warning(f"Error drawing text with font, using fallback: {e}")
-            draw.text((x, current_y), line, fill=rgb_color)
+            logger.warning(f"Error drawing text line '{line}': {e}")
+            # Continue with next line instead of failing
         
         current_y += line_height + 10  # 10px spacing between lines
     
     return img
 
 def create_text_clip_pil(clip_data: VideoClip, resolution: tuple) -> ImageClip:
-    """Create a text clip using PIL"""
+    """Create a text clip using PIL - Enhanced robustness"""
     try:
+        logger.info(f"Creating PIL text clip: '{clip_data.text[:50]}...'")
+        
         # Create text image
         text_img = create_text_image(
             text=clip_data.text,
@@ -194,16 +213,26 @@ def create_text_clip_pil(clip_data: VideoClip, resolution: tuple) -> ImageClip:
         # Create ImageClip
         text_clip = ImageClip(img_array, duration=clip_data.duration)
         
+        logger.info(f"PIL text clip created successfully")
         return text_clip
         
     except Exception as e:
         logger.error(f"Error creating PIL text clip: {str(e)}")
-        # Return a simple fallback
-        fallback_img = Image.new('RGBA', resolution, (0, 0, 0, 0))
-        draw = ImageDraw.Draw(fallback_img)
-        draw.text((resolution[0]//4, resolution[1]//2), 
-                 clip_data.text[:50], fill=(255, 255, 255, 255))
-        return ImageClip(np.array(fallback_img), duration=clip_data.duration)
+        # Return a robust fallback
+        try:
+            fallback_img = Image.new('RGBA', resolution, (0, 0, 0, 0))
+            draw = ImageDraw.Draw(fallback_img)
+            # Simple centered text
+            text_preview = clip_data.text[:50] + ("..." if len(clip_data.text) > 50 else "")
+            x = resolution[0] // 6
+            y = resolution[1] // 2
+            draw.text((x, y), text_preview, fill=(255, 255, 255, 255))
+            return ImageClip(np.array(fallback_img), duration=clip_data.duration)
+        except Exception as fallback_error:
+            logger.error(f"Fallback also failed: {fallback_error}")
+            # Ultimate fallback - solid color with no text
+            solid_img = Image.new('RGBA', resolution, (50, 50, 50, 128))
+            return ImageClip(np.array(solid_img), duration=clip_data.duration)
 
 def create_background_clip(clip_data: VideoClip, resolution: tuple) -> ColorClip:
     """Create a colored background clip"""
@@ -216,14 +245,20 @@ def create_background_clip(clip_data: VideoClip, resolution: tuple) -> ColorClip
 @app.get("/health")
 async def health_check():
     """Health check endpoint"""
-    return {"status": "healthy", "service": "moviepy-video-generator"}
+    return {
+        "status": "healthy", 
+        "service": "moviepy-video-generator",
+        "version": "1.1.0",
+        "renderer": "PIL"
+    }
 
 @app.get("/")
 async def root():
     """Root endpoint with API info"""
     return {
         "message": "MoviePy Video Generator API",
-        "version": "1.0.0",
+        "version": "1.1.0",
+        "renderer": "PIL (No ImageMagick dependency)",
         "endpoints": {
             "generate": "/generate-video",
             "status": "/status/{video_id}",
@@ -253,6 +288,7 @@ async def download_audio(url: str, temp_dir: str) -> Optional[str]:
 async def create_video_from_clips(request: VideoRequest, video_id: str) -> str:
     """Main function to create video from clips"""
     temp_dir = None
+    final_video = None
     try:
         # Parse resolution
         width, height = map(int, request.resolution.split('x'))
@@ -260,7 +296,7 @@ async def create_video_from_clips(request: VideoRequest, video_id: str) -> str:
         
         # Create temporary directory
         temp_dir = tempfile.mkdtemp(prefix=f"video_{video_id}_")
-        logger.info(f"Creating video {video_id} with resolution {resolution}")
+        logger.info(f"Creating video {video_id} with resolution {resolution} using PIL renderer")
         
         # Update status
         video_status[video_id] = {"status": "processing", "progress": 10}
@@ -269,7 +305,7 @@ async def create_video_from_clips(request: VideoRequest, video_id: str) -> str:
         video_clips = []
         
         for i, clip_data in enumerate(request.clips):
-            logger.info(f"Processing clip {i+1}/{len(request.clips)}")
+            logger.info(f"Processing clip {i+1}/{len(request.clips)}: '{clip_data.text[:30]}...'")
             
             # Create background
             background = create_background_clip(clip_data, resolution)
@@ -293,6 +329,7 @@ async def create_video_from_clips(request: VideoRequest, video_id: str) -> str:
         video_status[video_id] = {"status": "processing", "progress": 70}
         
         # Add background music if provided
+        background_audio = None
         if request.background_music_url:
             logger.info("Downloading and adding background music...")
             audio_path = await download_audio(request.background_music_url, temp_dir)
@@ -337,11 +374,6 @@ async def create_video_from_clips(request: VideoRequest, video_id: str) -> str:
             logger=None  # Disable moviepy logger
         )
         
-        # Clean up
-        final_video.close()
-        if 'background_audio' in locals():
-            background_audio.close()
-        
         # Update status
         video_status[video_id] = {
             "status": "completed",
@@ -349,7 +381,7 @@ async def create_video_from_clips(request: VideoRequest, video_id: str) -> str:
             "duration": final_video.duration
         }
         
-        logger.info(f"Video {video_id} created successfully")
+        logger.info(f"Video {video_id} created successfully with PIL renderer")
         return output_path
         
     except Exception as e:
@@ -362,6 +394,20 @@ async def create_video_from_clips(request: VideoRequest, video_id: str) -> str:
         raise HTTPException(status_code=500, detail=f"Error creating video: {str(e)}")
     
     finally:
+        # Clean up resources
+        try:
+            if final_video:
+                final_video.close()
+            if 'background_audio' in locals() and background_audio:
+                background_audio.close()
+            # Clean up individual clips
+            if 'video_clips' in locals():
+                for clip in video_clips:
+                    if hasattr(clip, 'close'):
+                        clip.close()
+        except Exception as e:
+            logger.error(f"Error cleaning up video resources: {str(e)}")
+        
         # Clean up temporary directory
         if temp_dir and os.path.exists(temp_dir):
             try:
@@ -397,7 +443,7 @@ async def generate_video(request: VideoRequest, background_tasks: BackgroundTask
         video_url=f"/videos/{video_id}",
         duration=total_duration,
         status="queued",
-        message="Video generation started"
+        message="Video generation started with PIL renderer"
     )
 
 @app.get("/status/{video_id}")
