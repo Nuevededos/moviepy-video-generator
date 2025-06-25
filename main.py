@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="MoviePy Video Generator",
     description="Servicio gratuito para generar videos motivacionales con MoviePy + PIL",
-    version="1.1.0"  # Updated version
+    version="1.1.1"  # Updated version
 )
 
 # Configuration
@@ -103,11 +103,11 @@ def get_font(font_size: int):
 
 def create_text_image(text: str, font_size: int, text_color: str, 
                      image_size: tuple, position: str = "center") -> Image.Image:
-    """Create text image using PIL - Robust implementation"""
+    """Create text image using PIL - RGB format for MoviePy"""
     width, height = image_size
     
-    # Create transparent image
-    img = Image.new('RGBA', (width, height), (0, 0, 0, 0))
+    # Create RGB image (3 channels) - MoviePy compatible
+    img = Image.new('RGB', (width, height), (0, 0, 0))  # Black background
     draw = ImageDraw.Draw(img)
     
     # Get font
@@ -194,11 +194,11 @@ def create_text_image(text: str, font_size: int, text_color: str,
     return img
 
 def create_text_clip_pil(clip_data: VideoClip, resolution: tuple) -> ImageClip:
-    """Create a text clip using PIL - Enhanced robustness"""
+    """Create a text clip using PIL - Fixed array dimensions"""
     try:
         logger.info(f"Creating PIL text clip: '{clip_data.text[:50]}...'")
         
-        # Create text image
+        # Create text image as RGB
         text_img = create_text_image(
             text=clip_data.text,
             font_size=clip_data.font_size,
@@ -207,8 +207,20 @@ def create_text_clip_pil(clip_data: VideoClip, resolution: tuple) -> ImageClip:
             position=clip_data.position
         )
         
-        # Convert PIL image to numpy array
+        # Convert PIL image to numpy array (ensure correct shape)
         img_array = np.array(text_img)
+        
+        # Ensure array has correct shape: (height, width, 3)
+        if len(img_array.shape) == 2:  # Grayscale
+            img_array = np.stack([img_array] * 3, axis=-1)
+        elif len(img_array.shape) == 3 and img_array.shape[2] == 4:  # RGBA
+            img_array = img_array[:, :, :3]  # Remove alpha channel
+        elif len(img_array.shape) == 3 and img_array.shape[2] == 3:  # RGB
+            pass  # Already correct
+        else:
+            raise ValueError(f"Unexpected image array shape: {img_array.shape}")
+        
+        logger.info(f"Image array shape: {img_array.shape}")
         
         # Create ImageClip
         text_clip = ImageClip(img_array, duration=clip_data.duration)
@@ -218,21 +230,26 @@ def create_text_clip_pil(clip_data: VideoClip, resolution: tuple) -> ImageClip:
         
     except Exception as e:
         logger.error(f"Error creating PIL text clip: {str(e)}")
-        # Return a robust fallback
+        # Return a robust fallback with correct dimensions
         try:
-            fallback_img = Image.new('RGBA', resolution, (0, 0, 0, 0))
+            fallback_img = Image.new('RGB', resolution, (50, 50, 50))  # Dark gray
             draw = ImageDraw.Draw(fallback_img)
             # Simple centered text
             text_preview = clip_data.text[:50] + ("..." if len(clip_data.text) > 50 else "")
             x = resolution[0] // 6
             y = resolution[1] // 2
-            draw.text((x, y), text_preview, fill=(255, 255, 255, 255))
-            return ImageClip(np.array(fallback_img), duration=clip_data.duration)
+            draw.text((x, y), text_preview, fill=(255, 255, 255))
+            
+            # Convert to array with correct shape
+            fallback_array = np.array(fallback_img)
+            logger.info(f"Fallback array shape: {fallback_array.shape}")
+            
+            return ImageClip(fallback_array, duration=clip_data.duration)
         except Exception as fallback_error:
             logger.error(f"Fallback also failed: {fallback_error}")
-            # Ultimate fallback - solid color with no text
-            solid_img = Image.new('RGBA', resolution, (50, 50, 50, 128))
-            return ImageClip(np.array(solid_img), duration=clip_data.duration)
+            # Ultimate fallback - solid color with correct shape
+            solid_array = np.full((resolution[1], resolution[0], 3), 50, dtype=np.uint8)
+            return ImageClip(solid_array, duration=clip_data.duration)
 
 def create_background_clip(clip_data: VideoClip, resolution: tuple) -> ColorClip:
     """Create a colored background clip"""
@@ -248,8 +265,8 @@ async def health_check():
     return {
         "status": "healthy", 
         "service": "moviepy-video-generator",
-        "version": "1.1.0",
-        "renderer": "PIL"
+        "version": "1.1.1",
+        "renderer": "PIL-Fixed"
     }
 
 @app.get("/")
@@ -257,8 +274,8 @@ async def root():
     """Root endpoint with API info"""
     return {
         "message": "MoviePy Video Generator API",
-        "version": "1.1.0",
-        "renderer": "PIL (No ImageMagick dependency)",
+        "version": "1.1.1",
+        "renderer": "PIL (Fixed array dimensions)",
         "endpoints": {
             "generate": "/generate-video",
             "status": "/status/{video_id}",
@@ -296,7 +313,7 @@ async def create_video_from_clips(request: VideoRequest, video_id: str) -> str:
         
         # Create temporary directory
         temp_dir = tempfile.mkdtemp(prefix=f"video_{video_id}_")
-        logger.info(f"Creating video {video_id} with resolution {resolution} using PIL renderer")
+        logger.info(f"Creating video {video_id} with resolution {resolution} using PIL renderer v1.1.1")
         
         # Update status
         video_status[video_id] = {"status": "processing", "progress": 10}
@@ -381,7 +398,7 @@ async def create_video_from_clips(request: VideoRequest, video_id: str) -> str:
             "duration": final_video.duration
         }
         
-        logger.info(f"Video {video_id} created successfully with PIL renderer")
+        logger.info(f"Video {video_id} created successfully with PIL renderer v1.1.1")
         return output_path
         
     except Exception as e:
@@ -443,7 +460,7 @@ async def generate_video(request: VideoRequest, background_tasks: BackgroundTask
         video_url=f"/videos/{video_id}",
         duration=total_duration,
         status="queued",
-        message="Video generation started with PIL renderer"
+        message="Video generation started with PIL renderer v1.1.1"
     )
 
 @app.get("/status/{video_id}")
