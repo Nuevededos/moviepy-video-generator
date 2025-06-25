@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="MoviePy Video Generator",
     description="Servicio gratuito para generar videos motivacionales con MoviePy + PIL",
-    version="1.1.1"  # Updated version
+    version="1.2.0"  # Simplified approach
 )
 
 # Configuration
@@ -76,188 +76,128 @@ def hex_to_rgb(hex_color: str) -> tuple:
     return tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
 
 def get_font(font_size: int):
-    """Get font with fallback system - PIL based"""
+    """Get font with fallback system"""
     font_paths = [
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
         "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-        "/System/Library/Fonts/Arial.ttf",  # macOS
-        "C:/Windows/Fonts/arial.ttf",  # Windows
     ]
     
     for font_path in font_paths:
         try:
             if os.path.exists(font_path):
                 return ImageFont.truetype(font_path, font_size)
-        except Exception as e:
-            logger.debug(f"Font {font_path} failed: {e}")
+        except Exception:
             continue
     
     # Fallback to default font
     try:
         return ImageFont.load_default()
     except Exception:
-        logger.warning("Using basic font fallback")
         return None
 
-def create_text_image(text: str, font_size: int, text_color: str, 
-                     image_size: tuple, position: str = "center") -> Image.Image:
-    """Create text image using PIL - RGB format for MoviePy"""
-    width, height = image_size
+def create_complete_frame(clip_data: VideoClip, resolution: tuple) -> np.ndarray:
+    """Create complete frame with background + text using PIL - SIMPLIFIED"""
+    width, height = resolution
     
-    # Create RGB image (3 channels) - MoviePy compatible
-    img = Image.new('RGB', (width, height), (0, 0, 0))  # Black background
-    draw = ImageDraw.Draw(img)
-    
-    # Get font
-    font = get_font(font_size)
-    
-    # Convert color
     try:
-        rgb_color = hex_to_rgb(text_color)
-    except:
-        rgb_color = (255, 255, 255)  # White fallback
-    
-    # Word wrap for long text
-    max_chars_per_line = max(15, min(50, width // (font_size // 3)))
-    wrapped_text = textwrap.fill(text, width=max_chars_per_line)
-    lines = wrapped_text.split('\n')
-    
-    # Calculate text dimensions
-    if font:
-        # Get text bbox for each line
-        line_heights = []
-        line_widths = []
+        # Create RGB image with background color
+        bg_color = hex_to_rgb(clip_data.background_color)
+        img = Image.new('RGB', (width, height), bg_color)
+        draw = ImageDraw.Draw(img)
+        
+        # Get font
+        font = get_font(clip_data.font_size)
+        
+        # Text color
+        text_color = hex_to_rgb(clip_data.text_color)
+        
+        # Word wrap
+        max_chars = max(15, min(40, width // (clip_data.font_size // 3)))
+        wrapped_text = textwrap.fill(clip_data.text, width=max_chars)
+        lines = wrapped_text.split('\n')
+        
+        # Calculate total text height
+        line_height = clip_data.font_size + 10
+        total_text_height = len(lines) * line_height
+        
+        # Calculate starting Y position
+        if clip_data.position == "center":
+            start_y = (height - total_text_height) // 2
+        elif clip_data.position == "top":
+            start_y = 50
+        elif clip_data.position == "bottom":
+            start_y = height - total_text_height - 50
+        else:
+            start_y = (height - total_text_height) // 2
+        
+        # Draw text lines
+        current_y = start_y
         for line in lines:
-            try:
-                bbox = draw.textbbox((0, 0), line, font=font)
-                line_widths.append(bbox[2] - bbox[0])
-                line_heights.append(bbox[3] - bbox[1])
-            except:
-                # Fallback calculation
-                line_widths.append(len(line) * font_size // 2)
-                line_heights.append(font_size)
-        
-        total_height = sum(line_heights) + (len(lines) - 1) * 10  # 10px spacing
-        max_width = max(line_widths) if line_widths else font_size
-    else:
-        # Fallback calculation when no font available
-        char_width = max(font_size // 2, 12)
-        char_height = max(font_size, 20)
-        max_width = max(len(line) * char_width for line in lines) if lines else char_width
-        total_height = len(lines) * char_height + (len(lines) - 1) * 10
-    
-    # Calculate position
-    if position == "center":
-        start_y = max(50, (height - total_height) // 2)
-    elif position == "top":
-        start_y = 50
-    elif position == "bottom":
-        start_y = max(50, height - total_height - 50)
-    else:
-        start_y = max(50, (height - total_height) // 2)
-    
-    # Draw each line
-    current_y = start_y
-    for i, line in enumerate(lines):
-        if not line.strip():  # Skip empty lines
-            current_y += 20
-            continue
+            if line.strip():  # Skip empty lines
+                # Calculate line width for centering
+                if font:
+                    try:
+                        bbox = draw.textbbox((0, 0), line, font=font)
+                        line_width = bbox[2] - bbox[0]
+                    except:
+                        line_width = len(line) * (clip_data.font_size // 2)
+                else:
+                    line_width = len(line) * (clip_data.font_size // 2)
+                
+                x = (width - line_width) // 2  # Center horizontally
+                
+                # Draw text
+                try:
+                    if font:
+                        draw.text((x, current_y), line, fill=text_color, font=font)
+                    else:
+                        draw.text((x, current_y), line, fill=text_color)
+                except Exception as e:
+                    logger.warning(f"Error drawing line '{line}': {e}")
             
-        if font:
-            try:
-                bbox = draw.textbbox((0, 0), line, font=font)
-                line_width = bbox[2] - bbox[0]
-                line_height = max(bbox[3] - bbox[1], 20)
-            except:
-                line_width = len(line) * (font_size // 2)
-                line_height = font_size
-        else:
-            line_width = len(line) * max(font_size // 2, 12)
-            line_height = max(font_size, 20)
+            current_y += line_height
         
-        x = max(20, (width - line_width) // 2)  # Center horizontally with margin
+        # Convert to numpy array - EXPLICIT RGB
+        img_array = np.array(img, dtype=np.uint8)
         
-        try:
-            if font:
-                draw.text((x, current_y), line, fill=rgb_color, font=font)
-            else:
-                # Fallback without font - use default
-                draw.text((x, current_y), line, fill=rgb_color)
-        except Exception as e:
-            logger.warning(f"Error drawing text line '{line}': {e}")
-            # Continue with next line instead of failing
+        # Verify shape
+        if len(img_array.shape) != 3 or img_array.shape[2] != 3:
+            logger.error(f"Wrong shape: {img_array.shape}")
+            # Force correct shape
+            img_array = np.zeros((height, width, 3), dtype=np.uint8)
+            img_array[:, :] = bg_color
         
-        current_y += line_height + 10  # 10px spacing between lines
-    
-    return img
-
-def create_text_clip_pil(clip_data: VideoClip, resolution: tuple) -> ImageClip:
-    """Create a text clip using PIL - Fixed array dimensions"""
-    try:
-        logger.info(f"Creating PIL text clip: '{clip_data.text[:50]}...'")
-        
-        # Create text image as RGB
-        text_img = create_text_image(
-            text=clip_data.text,
-            font_size=clip_data.font_size,
-            text_color=clip_data.text_color,
-            image_size=resolution,
-            position=clip_data.position
-        )
-        
-        # Convert PIL image to numpy array (ensure correct shape)
-        img_array = np.array(text_img)
-        
-        # Ensure array has correct shape: (height, width, 3)
-        if len(img_array.shape) == 2:  # Grayscale
-            img_array = np.stack([img_array] * 3, axis=-1)
-        elif len(img_array.shape) == 3 and img_array.shape[2] == 4:  # RGBA
-            img_array = img_array[:, :, :3]  # Remove alpha channel
-        elif len(img_array.shape) == 3 and img_array.shape[2] == 3:  # RGB
-            pass  # Already correct
-        else:
-            raise ValueError(f"Unexpected image array shape: {img_array.shape}")
-        
-        logger.info(f"Image array shape: {img_array.shape}")
-        
-        # Create ImageClip
-        text_clip = ImageClip(img_array, duration=clip_data.duration)
-        
-        logger.info(f"PIL text clip created successfully")
-        return text_clip
+        logger.info(f"Frame created successfully: {img_array.shape}")
+        return img_array
         
     except Exception as e:
-        logger.error(f"Error creating PIL text clip: {str(e)}")
-        # Return a robust fallback with correct dimensions
-        try:
-            fallback_img = Image.new('RGB', resolution, (50, 50, 50))  # Dark gray
-            draw = ImageDraw.Draw(fallback_img)
-            # Simple centered text
-            text_preview = clip_data.text[:50] + ("..." if len(clip_data.text) > 50 else "")
-            x = resolution[0] // 6
-            y = resolution[1] // 2
-            draw.text((x, y), text_preview, fill=(255, 255, 255))
-            
-            # Convert to array with correct shape
-            fallback_array = np.array(fallback_img)
-            logger.info(f"Fallback array shape: {fallback_array.shape}")
-            
-            return ImageClip(fallback_array, duration=clip_data.duration)
-        except Exception as fallback_error:
-            logger.error(f"Fallback also failed: {fallback_error}")
-            # Ultimate fallback - solid color with correct shape
-            solid_array = np.full((resolution[1], resolution[0], 3), 50, dtype=np.uint8)
-            return ImageClip(solid_array, duration=clip_data.duration)
+        logger.error(f"Error creating frame: {e}")
+        # Ultimate fallback - solid color array
+        bg_color = hex_to_rgb(clip_data.background_color)
+        fallback_array = np.full((height, width, 3), bg_color, dtype=np.uint8)
+        return fallback_array
 
-def create_background_clip(clip_data: VideoClip, resolution: tuple) -> ColorClip:
-    """Create a colored background clip"""
-    return ColorClip(
-        size=resolution,
-        color=clip_data.background_color,
-        duration=clip_data.duration
-    )
+def create_video_clip_simple(clip_data: VideoClip, resolution: tuple) -> ImageClip:
+    """Create video clip - SIMPLIFIED approach"""
+    try:
+        # Create complete frame (background + text)
+        frame_array = create_complete_frame(clip_data, resolution)
+        
+        # Create ImageClip directly
+        clip = ImageClip(frame_array, duration=clip_data.duration)
+        
+        logger.info(f"Video clip created: {frame_array.shape}, duration: {clip_data.duration}s")
+        return clip
+        
+    except Exception as e:
+        logger.error(f"Error creating video clip: {e}")
+        # Solid color fallback
+        width, height = resolution
+        bg_color = hex_to_rgb(clip_data.background_color)
+        solid_array = np.full((height, width, 3), bg_color, dtype=np.uint8)
+        return ImageClip(solid_array, duration=clip_data.duration)
 
 @app.get("/health")
 async def health_check():
@@ -265,8 +205,8 @@ async def health_check():
     return {
         "status": "healthy", 
         "service": "moviepy-video-generator",
-        "version": "1.1.1",
-        "renderer": "PIL-Fixed"
+        "version": "1.2.0",
+        "renderer": "PIL-Simplified"
     }
 
 @app.get("/")
@@ -274,8 +214,8 @@ async def root():
     """Root endpoint with API info"""
     return {
         "message": "MoviePy Video Generator API",
-        "version": "1.1.1",
-        "renderer": "PIL (Fixed array dimensions)",
+        "version": "1.2.0",
+        "renderer": "PIL Simplified (Single frame approach)",
         "endpoints": {
             "generate": "/generate-video",
             "status": "/status/{video_id}",
@@ -303,7 +243,7 @@ async def download_audio(url: str, temp_dir: str) -> Optional[str]:
         return None
 
 async def create_video_from_clips(request: VideoRequest, video_id: str) -> str:
-    """Main function to create video from clips"""
+    """Main function to create video from clips - SIMPLIFIED"""
     temp_dir = None
     final_video = None
     try:
@@ -313,26 +253,20 @@ async def create_video_from_clips(request: VideoRequest, video_id: str) -> str:
         
         # Create temporary directory
         temp_dir = tempfile.mkdtemp(prefix=f"video_{video_id}_")
-        logger.info(f"Creating video {video_id} with resolution {resolution} using PIL renderer v1.1.1")
+        logger.info(f"Creating video {video_id} with resolution {resolution} - Simplified PIL v1.2.0")
         
         # Update status
         video_status[video_id] = {"status": "processing", "progress": 10}
         
-        # Create video clips
+        # Create video clips - SIMPLIFIED
         video_clips = []
         
         for i, clip_data in enumerate(request.clips):
             logger.info(f"Processing clip {i+1}/{len(request.clips)}: '{clip_data.text[:30]}...'")
             
-            # Create background
-            background = create_background_clip(clip_data, resolution)
-            
-            # Create text overlay using PIL
-            text_clip = create_text_clip_pil(clip_data, resolution)
-            
-            # Composite clip
-            composite_clip = CompositeVideoClip([background, text_clip])
-            video_clips.append(composite_clip)
+            # Create complete video clip (background + text in one)
+            video_clip = create_video_clip_simple(clip_data, resolution)
+            video_clips.append(video_clip)
             
             # Update progress
             progress = 10 + (i + 1) * 50 // len(request.clips)
@@ -398,7 +332,7 @@ async def create_video_from_clips(request: VideoRequest, video_id: str) -> str:
             "duration": final_video.duration
         }
         
-        logger.info(f"Video {video_id} created successfully with PIL renderer v1.1.1")
+        logger.info(f"Video {video_id} created successfully - Simplified PIL v1.2.0")
         return output_path
         
     except Exception as e:
@@ -460,7 +394,7 @@ async def generate_video(request: VideoRequest, background_tasks: BackgroundTask
         video_url=f"/videos/{video_id}",
         duration=total_duration,
         status="queued",
-        message="Video generation started with PIL renderer v1.1.1"
+        message="Video generation started - Simplified PIL v1.2.0"
     )
 
 @app.get("/status/{video_id}")
