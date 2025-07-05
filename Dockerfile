@@ -29,11 +29,11 @@ COPY . .
 # Create necessary directories
 RUN mkdir -p /app/videos /app/temp
 
-# Set environment variables
+# Set environment variables - OPTIMIZED VERSION
 ENV VIDEO_OUTPUT_DIR=/app/videos
 ENV TEMP_DIR=/app/temp
 ENV MAX_WORKERS=2
-ENV MAX_VIDEO_DURATION=300
+ENV MAX_VIDEO_DURATION=600
 ENV PYTHONUNBUFFERED=1
 
 # Expose port
@@ -43,5 +43,5 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:8080/health || exit 1
 
-# Run the application
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080", "--workers", "1"]
+# Run the OPTIMIZED application
+CMD ["uvicorn", "main_optimized:app", "--host", "0.0.0.0", "--port", "8080", "--workers", "1"]
